@@ -55,7 +55,10 @@ class EnqueuedView(val state: RHMIState, val musicController: MusicController) {
 			listComponent.setEnabled(true)
 			listComponent.setSelectable(true)
 			songsList.addAll(songs)
-			listComponent.getModel()?.setValue(songsListAdapter, 0, songsListAdapter.height, songsListAdapter.height)
+
+			listComponent.requestDataCallback = RequestDataCallback { startIndex, numRows ->
+				showList(startIndex, numRows)
+			}
 
 			// set the selection to the current song
 			val index = songs.indexOfFirst { it.queueId == currentSong?.queueId }
@@ -69,6 +72,10 @@ class EnqueuedView(val state: RHMIState, val musicController: MusicController) {
 			listComponent.setSelectable(false)
 			listComponent.getModel()?.setValue(songsEmptyList, 0, songsEmptyList.height, songsEmptyList.height)
 		}
+	}
+
+	fun showList(startIndex: Int = 0, numRows: Int = 10) {
+		listComponent.getModel()?.setValue(songsListAdapter, startIndex, numRows, songsListAdapter.height)
 	}
 
 	fun onClick(index: Int) {
