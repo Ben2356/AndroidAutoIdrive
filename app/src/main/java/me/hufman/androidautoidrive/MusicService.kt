@@ -121,7 +121,4 @@ class MusicService(val context: Context, val securityAccess: SecurityAccess, val
 		}
 		threadMusic = null
 	}
-
-
-
 }

@@ -1,9 +1,15 @@
 package me.hufman.androidautoidrive.phoneui
 
 import android.arch.lifecycle.ViewModelProviders
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
 import android.graphics.*
 import android.os.Bundle
+import android.os.IBinder
 import android.support.v4.app.Fragment
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -14,9 +20,12 @@ import me.hufman.androidautoidrive.Utils
 import me.hufman.androidautoidrive.getThemeColor
 import me.hufman.androidautoidrive.music.MusicController
 import me.hufman.androidautoidrive.music.controllers.SpotifyAppController
+import me.hufman.androidautoidrive.music.spotify.SpotifyOAuthService
+import me.hufman.androidautoidrive.music.spotify.authentication.SpotifyOAuth
 
 class MusicNowPlayingFragment: Fragment() {
 	companion object {
+		const val TAG = "MusicNowPlayingFragment"
 		const val ARTIST_ID = "150.png"
 		const val ALBUM_ID = "148.png"
 		const val SONG_ID = "152.png"
@@ -25,6 +34,22 @@ class MusicNowPlayingFragment: Fragment() {
 
 	lateinit var musicController: MusicController
 	lateinit var placeholderCoverArt: Bitmap
+	var spotifyOAuth: SpotifyOAuth? = null
+	var isSpotifyOAuthServiceBound: Boolean = false
+	val oauthServiceConnector = object: ServiceConnection {
+		override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+			Log.d(TAG, "SpotifyOAuthService connected")
+			val localBinder = service as SpotifyOAuthService.LocalBinder
+			val spotifyOAuthService = localBinder.getSpotifyOAuthServiceInstance()
+			spotifyOAuth = spotifyOAuthService.getSpotifyOAuthInstance()
+			isSpotifyOAuthServiceBound = true
+		}
+
+		override fun onServiceDisconnected(name: ComponentName?) {
+			Log.d(TAG, "SpotifyOAuthService disconnected")
+			isSpotifyOAuthServiceBound = false
+		}
+	}
 
 	fun onActive() {
 		musicController.listener = Runnable { redraw() }
@@ -80,6 +105,13 @@ class MusicNowPlayingFragment: Fragment() {
 
 	fun redraw() {
 		if (!isVisible) return
+
+		// only want this to bind to the SpotifyOAuthService if it is already running and not start the Service
+		if (SpotifyOAuthService.isRunning && !isSpotifyOAuthServiceBound) {
+			val spotifyOAuthServiceIntent = Intent(context, SpotifyOAuthService::class.java)
+			context?.bindService(spotifyOAuthServiceIntent, oauthServiceConnector, Context.BIND_AUTO_CREATE)
+		}
+
 		val metadata = musicController.getMetadata()
 		if (metadata?.coverArt != null) {
 			imgCoverArt.setImageBitmap(metadata.coverArt)
@@ -99,15 +131,21 @@ class MusicNowPlayingFragment: Fragment() {
 		seekProgress.progress = (position.getPosition() / 1000).toInt()
 		seekProgress.max = (position.maximumPosition / 1000).toInt()
 
-		// show any spotify errors
+		// show any spotify app remote errors
 		val fragmentManager = activity?.supportFragmentManager
 		val spotifyError = musicController.connectors.filterIsInstance<SpotifyAppController.Connector>().firstOrNull()?.lastError
-		if (fragmentManager != null && spotifyError != null) {
+
+		val isWebApiAuthorized = spotifyOAuth?.isAuthorized()
+
+		if (fragmentManager != null && (spotifyError != null || isWebApiAuthorized == false)) {
 			imgError.visible = true
 			imgError.setOnClickListener {
 				val arguments = Bundle().apply {
 					putString(SpotifyApiErrorDialog.EXTRA_CLASSNAME, spotifyError?.javaClass?.simpleName)
 					putString(SpotifyApiErrorDialog.EXTRA_MESSAGE, spotifyError?.message)
+					if (isWebApiAuthorized != null) {
+						putBoolean(SpotifyApiErrorDialog.EXTRA_WEB_API_AUTHORIZED, isWebApiAuthorized)
+					}
 				}
 				SpotifyApiErrorDialog().apply {
 					setArguments(arguments)
@@ -117,6 +155,14 @@ class MusicNowPlayingFragment: Fragment() {
 		} else {
 			imgError.visible = false
 			imgError.setOnClickListener(null)
+		}
+	}
+
+	override fun onDestroy() {
+		super.onDestroy()
+		if (isSpotifyOAuthServiceBound) {
+			context?.unbindService(oauthServiceConnector)
+			isSpotifyOAuthServiceBound = false
 		}
 	}
 }

@@ -1,12 +1,18 @@
 package me.hufman.androidautoidrive.music.controllers
 
+import android.content.ComponentName
 import android.content.Context
+import android.content.Context.BIND_AUTO_CREATE
+import android.content.Intent
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.drawable.Drawable
 import android.os.Handler
+import android.os.IBinder
 import android.util.Log
 import android.util.LruCache
+import android.widget.Toast
 import com.spotify.android.appremote.api.ConnectionParams
 import com.spotify.android.appremote.api.SpotifyAppRemote
 import com.spotify.protocol.client.Subscription
@@ -17,14 +23,25 @@ import me.hufman.androidautoidrive.Observable
 import me.hufman.androidautoidrive.R
 import me.hufman.androidautoidrive.music.*
 import me.hufman.androidautoidrive.music.PlaybackPosition
-import java.lang.Exception
+import me.hufman.androidautoidrive.music.spotify.SpotifyOAuthService
+import me.hufman.androidautoidrive.music.spotify.SpotifyWebApi
+import me.hufman.androidautoidrive.music.spotify.authentication.AccessTokenAuthenticator
+import me.hufman.androidautoidrive.music.spotify.authentication.SpotifyOAuth
+import me.hufman.androidautoidrive.music.spotify.models.User
+import okhttp3.*
+import retrofit2.Call
+import retrofit2.Callback
+import retrofit2.Response
+import retrofit2.Retrofit
+import retrofit2.converter.gson.GsonConverterFactory
 import java.util.*
 
-class SpotifyAppController(context: Context, val remote: SpotifyAppRemote): MusicAppController {
+class SpotifyAppController(val context: Context, val remote: SpotifyAppRemote): MusicAppController {
 	companion object {
 		const val TAG = "SpotifyAppController"
 		const val REDIRECT_URI = "me.hufman.androidautoidrive://spotify_callback"
-		
+		const val API_BASE_URL = "https://api.spotify.com/v1/"
+
 		fun hasSupport(context: Context): Boolean {
 			val CLIENT_ID = context.packageManager.getApplicationInfo(context.packageName, PackageManager.GET_META_DATA)
 					.metaData.getString("com.spotify.music.API_KEY", "unavailable")
@@ -37,19 +54,6 @@ class SpotifyAppController(context: Context, val remote: SpotifyAppRemote): Musi
 					title = track.name, album = track.album.name, artist = track.artist.name, coverArt = coverArt)
 		}
 
-		fun MusicMetadata.Companion.fromSpotifyQueueListItem(listItem: ListItem): MusicMetadata {
-			return MusicMetadata(mediaId = listItem.uri, queueId = listItem.uri.hashCode().toLong(),
-					title = listItem.title, artist = listItem.subtitle,
-					playable = listItem.playable, browseable = listItem.hasChildren,
-					coverArtUri = listItem.imageUri?.raw)
-		}
-
-		fun MusicMetadata.Companion.fromSpotify(listItem: ListItem, coverArt: Bitmap? = null): MusicMetadata {
-			// browse result
-			return MusicMetadata(mediaId = listItem.uri, queueId = listItem.uri.hashCode().toLong(),
-					title = listItem.title, subtitle = listItem.subtitle,
-					playable = listItem.playable, browseable = listItem.hasChildren, coverArt = coverArt)
-		}
 		fun MusicMetadata.toListItem(): ListItem {
 			return ListItem(this.mediaId, this.mediaId, null, this.title, this.subtitle,
 					this.playable, this.browseable)
@@ -146,7 +150,29 @@ class SpotifyAppController(context: Context, val remote: SpotifyAppRemote): Musi
 	var queueMetadata: QueueMetadata? = null
 	val coverArtCache = LruCache<ImageUri, Bitmap>(50)
 
+	var spotifyWebApi: SpotifyWebApi? = null
+	var spotifyOAuth: SpotifyOAuth? = null
+	val oauthServiceConnector = object: ServiceConnection {
+		override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+			Log.d(TAG, "SpotifyOAuthService connected")
+			val localBinder = service as SpotifyOAuthService.LocalBinder
+			val spotifyOAuthService = localBinder.getSpotifyOAuthServiceInstance()
+			spotifyOAuth = spotifyOAuthService.getSpotifyOAuthInstance()
+			if (!spotifyOAuth?.isAuthorized()!!) {
+				Log.d(TAG, "Authorization is either expired or not found, creating notification")
+				spotifyOAuth?.createNotAuthorizedNotification(context)
+			}
+			spotifyWebApi = initSpotifyWebApi()
+		}
+
+		override fun onServiceDisconnected(name: ComponentName?) {
+			Log.d(TAG, "SpotifyOAuthService disconnected")
+		}
+	}
+
 	init {
+		bindToOAuthService()
+
 		spotifySubscription.setEventCallback { playerState ->
 			Log.d(TAG, "Heard an update from Spotify")
 
@@ -213,6 +239,34 @@ class SpotifyAppController(context: Context, val remote: SpotifyAppRemote): Musi
 	}
 
 	/**
+	 * Starts and binds to the [SpotifyOAuthService] to access the Spotify OAuth session.
+	 */
+	private fun bindToOAuthService() {
+		val spotifyOAuthServiceIntent = Intent(context, SpotifyOAuthService::class.java)
+		context.startService(spotifyOAuthServiceIntent)
+		context.bindService(spotifyOAuthServiceIntent, oauthServiceConnector, BIND_AUTO_CREATE)
+	}
+
+	/**
+	 * Initialize Spotify Web API service that is used to perform the API calls.
+	 */
+	private fun initSpotifyWebApi(): SpotifyWebApi {
+		val httpClient = OkHttpClient.Builder()
+				.addInterceptor { chain ->
+					chain.proceed(AccessTokenAuthenticator.attachTokenToRequest(chain.request(), spotifyOAuth?.getAccessToken()))
+				}
+				.authenticator(AccessTokenAuthenticator(spotifyOAuth, context))
+				.build()
+
+		val retrofit = Retrofit.Builder()
+				.baseUrl(API_BASE_URL)
+				.addConverterFactory(GsonConverterFactory.create())
+				.client(httpClient)
+				.build()
+		return retrofit.create(SpotifyWebApi::class.java)
+	}
+
+	/**
 	 * Retrieves the cover art Bitmap for the provided ImageUri. If it is present in the coverArtCache
 	 * then the Bitmap is returned otherwise the imagesApi is called to asynchronously add the cover
 	 * art Bitmap to the cache and returns null in the meantime.
@@ -240,7 +294,7 @@ class SpotifyAppController(context: Context, val remote: SpotifyAppRemote): Musi
 			val item = recentlyPlayed?.items?.get(0)
 			if (item != null) {
 				remote.imagesApi.getImage(item.imageUri, Image.Dimension.THUMBNAIL).setResultCallback { coverArt ->
-					queueMetadata = QueueMetadata(item.title,item.subtitle,queueItems,coverArt)
+					queueMetadata = QueueMetadata(item.title, item.subtitle, queueItems, coverArt)
 				}
 			}
 		}
@@ -296,6 +350,20 @@ class SpotifyAppController(context: Context, val remote: SpotifyAppRemote): Musi
 
 	override fun skipToNext() {
 		remote.playerApi.skipNext()
+
+		//TEST
+		spotifyWebApi?.getCurrentUser()?.enqueue(object: Callback<User> {
+			override fun onResponse(call: Call<User>, response: Response<User>) {
+				if (response.code() == 200) {
+					Toast.makeText(context, response.body()?.displayName, Toast.LENGTH_SHORT).show()
+				}
+			}
+
+			override fun onFailure(call: Call<User>, t: Throwable) {
+				Toast.makeText(context, "API CALL FAILURE", Toast.LENGTH_SHORT).show()
+			}
+		})
+		//END TEST
 	}
 
 	override fun seekTo(newPos: Long) {
@@ -425,7 +493,6 @@ class SpotifyAppController(context: Context, val remote: SpotifyAppRemote): Musi
 		return when(playerOptions?.repeatMode) {
 			Repeat.ALL -> RepeatMode.ALL
 			Repeat.ONE -> RepeatMode.ONE
-			Repeat.OFF -> RepeatMode.OFF
 			else -> RepeatMode.OFF
 		}
 	}
