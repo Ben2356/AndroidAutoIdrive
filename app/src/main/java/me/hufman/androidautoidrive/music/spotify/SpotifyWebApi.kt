@@ -12,6 +12,8 @@ import androidx.core.app.NotificationCompat
 import com.adamratzman.spotify.*
 import com.adamratzman.spotify.models.SpotifyImage
 import com.adamratzman.spotify.models.Token
+import com.adamratzman.spotify.models.Track
+import com.adamratzman.spotify.utils.Market
 import kotlinx.coroutines.runBlocking
 import me.hufman.androidautoidrive.AppSettings
 import me.hufman.androidautoidrive.MutableAppSettings
@@ -79,12 +81,7 @@ class SpotifyWebApi private constructor(val context: Context, val appSettings: M
 		try {
 			val likedSongs = webApi?.library?.getSavedTracks(50)?.getAllItemsNotNull()
 			return likedSongs?.map {
-				val track = it.track
-				val mediaId = track.uri.uri
-				val artists = track.artists.map { it.name }.joinToString(", ")
-				val album = track.album
-				val coverArtUri = getCoverArtUri(album.images)
-				SpotifyMusicMetadata(spotifyAppController, mediaId, mediaId.hashCode().toLong(), coverArtUri, artists, album.name, track.name)
+				createSpotifyMusicMetadataFromTrack(it.track, spotifyAppController)
 			}
 		} catch (e: SpotifyException.AuthenticationException) {
 			Log.e(TAG, "Failed to get data from Liked Songs library due to authentication error with the message: ${e.message}")
@@ -92,6 +89,31 @@ class SpotifyWebApi private constructor(val context: Context, val appSettings: M
 			createNotAuthorizedNotification()
 		} catch (e: Exception) {
 			Log.e(TAG, "Exception occurred while getting Liked Songs library data with message: ${e.message}")
+		}
+		return null
+	}
+
+	suspend fun getArtistTopSongs(spotifyAppController: SpotifyAppController, artistUri: String): List<SpotifyMusicMetadata>? {
+		if (webApi == null) {
+			//TODO: need to revisit the system for handling reattempts at API calls after realizing that the webApi is not authorized that avoids the
+			// storing of specific params to the createQueueMetadata call from SpotifyAppController
+			//  - reattempts only make sense for QueueMetadata construction when the user has the same playerContext
+			//  - job for creation of QueueMetadata should probably be stored in the SpotifyAppController and called from such as storing the API call attempt isn't enough - the whole queue creation job must be stored
+
+			return emptyList()
+		}
+		try {
+			//TODO: figure out market, some relation to token??
+			val topSongs = webApi?.artists?.getArtistTopTracks(artistUri, Market.US)
+			return topSongs?.map {
+				createSpotifyMusicMetadataFromTrack(it, spotifyAppController)
+			}
+		} catch (e: SpotifyException.AuthenticationException) {
+			Log.e(TAG, "Failed to get top tracks from ArtistUri $artistUri due to authentication error with the message: ${e.message}")
+			authStateManager.addAccessTokenAuthorizationException(e)
+			createNotAuthorizedNotification()
+		} catch (e: Exception) {
+			Log.e(TAG, "Exception occurred while getting top tracks from ArtistUri $artistUri with the message: ${e.message}")
 		}
 		return null
 	}
@@ -311,6 +333,17 @@ class SpotifyWebApi private constructor(val context: Context, val appSettings: M
 		} else {
 			null
 		}
+	}
+
+	/**
+	 * Creates a [SpotifyMusicMetadata] from a provided [Track].
+	 */
+	private fun createSpotifyMusicMetadataFromTrack(track: Track, spotifyAppController: SpotifyAppController): SpotifyMusicMetadata {
+		val mediaId = track.uri.uri
+		val artists = track.artists.map { it.name }.joinToString(", ")
+		val album = track.album
+		val coverArtUri = getCoverArtUri(album.images)
+		return SpotifyMusicMetadata(spotifyAppController, mediaId, mediaId.hashCode().toLong(), coverArtUri, artists, album.name, track.name)
 	}
 
 	/**

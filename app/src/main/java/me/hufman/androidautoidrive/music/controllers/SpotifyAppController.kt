@@ -222,20 +222,43 @@ class SpotifyAppController(context: Context, val remote: SpotifyAppRemote, val w
 				queueUri = uri
 				queueItems = emptyList()
 
+				// if there are any running QueueMetadata creation jobs then stop those
+				if (createQueueMetadataJob?.isActive == true) {
+					createQueueMetadataJob?.cancel()
+				}
+				createQueueMetadataJob = null
+				webApi.clearGetLikedSongsAttemptedFlag()
+
 				val isLikedSongsPlaylist = playerContext.type == "your_library" || playerContext.type == "your_library_tracks"
+				val isArtistPlaylist = playerContext.type == "artist"
 				if (isLikedSongsPlaylist) {
 					createLikedSongsQueueMetadata()
+				} else if (isArtistPlaylist) {
+					createArtistTopSongsQueueMetadata(playerContext)
 				} else {
-					if (createQueueMetadataJob?.isActive == true) {
-						createQueueMetadataJob?.cancel()
-					}
-					createQueueMetadataJob = null
-					webApi.clearGetLikedSongsAttemptedFlag()
 					createQueueMetadata(playerContext)
 				}
 			}
 
 			callback?.invoke(this)
+		}
+	}
+
+	/**
+	 * Creates the [QueueMetadata] for the artist playlist with the artist's top songs using the Web
+	 * API. If the Web API is not authorized then the [QueueMetadata] is created from the app remote API.
+	 */
+	fun createArtistTopSongsQueueMetadata(playerContext: PlayerContext) {
+		createQueueMetadataJob = GlobalScope.launch(defaultDispatcher) {
+			queueItems = webApi.getArtistTopSongs(this@SpotifyAppController, playerContext.uri) ?: emptyList()
+			if (queueItems.isNotEmpty()) {
+				queueMetadata = QueueMetadata(playerContext.title, "Artist", queueItems)
+				loadQueueCoverart()
+
+				callback?.invoke(this@SpotifyAppController)
+			} else {
+				createQueueMetadata(playerContext)
+			}
 		}
 	}
 
